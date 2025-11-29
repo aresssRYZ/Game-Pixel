@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>Game Pixel Kerajaan - Horor Pocong (Stealth)</title>
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #0b0b16;
+      font-family: system-ui, sans-serif;
+      touch-action: none;
+    }
+
+    #game-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      background: #1a1a2e;
+      border: 3px solid #f5f5f5;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      display: block;
+    }
+
+    #info {
+      position: absolute;
+      left: 50%;
+      bottom: 10px;
+      transform: translateX(-50%);
+      padding: 6px 12px;
+      background: rgba(0,0,0,0.6);
+      border-radius: 6px;
+      font-size: 12px;
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    /* ====== ANALOG ====== */
+    #joystick {
+      position: absolute;
+      left: 20px;
+      bottom: 20px;
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: rgba(15,23,42,0.6);
+      border: 2px solid #64748b;
+      box-shadow: 0 0 10px rgba(0,0,0,0.7);
+      z-index: 20;
+      touch-action: none;
+    }
+    #joystick-handle {
+      position: absolute;
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.85);
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    /* BUTTON MULAI (KHUSUS ANDROID) */
+    #start-mobile {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%,-50%);
+      padding: 18px 30px;
+      font-size: 20px;
+      background: #0f172a;
+      color: white;
+      border-radius: 12px;
+      border: 2px solid #facc15;
+      display: none;
+      z-index: 9999;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- BUTTON MULAI ANDROID -->
+  <button id="start-mobile">Mulai Game</button>
+
+  <div id="game-container">
+    <canvas id="game"></canvas>
+
+    <!-- ANALOG -->
+    <div id="joystick">
+      <div id="joystick-handle"></div>
+    </div>
+
+    <div id="info">
+      <strong>Kontrol PC:</strong> WASD / Panah • <strong>F</strong> fullscreen<br>
+      <strong>Android:</strong> Gunakan analog kiri bawah
+    </div>
+  </div>
+
+<script>
+  /* =====================================================
+     ANDROID AUTO FULLSCREEN + LOCK LANDSCAPE
+  ===================================================== */
+
+  function isAndroid() {
+    return /Android/i.test(navigator.userAgent);
+  }
+
+  async function forceFullscreenLandscape() {
+    try {
+      let el = document.documentElement;
+
+      if (el.requestFullscreen) await el.requestFullscreen();
+
+      if (screen.orientation && screen.orientation.lock)
+        await screen.orientation.lock("landscape");
+
+    } catch (e) {
+      console.log("Fullscreen/lock failed:", e);
+    }
+
+    // sembunyikan UI bar
+    setTimeout(() => window.scrollTo(0,1), 300);
+  }
+
+  window.addEventListener("load", () => {
+    if (isAndroid()) {
+      const btn = document.getElementById("start-mobile");
+      btn.style.display = "block";
+
+      btn.addEventListener("click", async () => {
+        btn.style.display = "none";
+        await forceFullscreenLandscape();
+      });
+    }
+  });
+
+  // Kalau keluar fullscreen, masuk lagi otomatis (Android)
+  document.addEventListener("fullscreenchange", () => {
+    if (isAndroid() && !document.fullscreenElement) {
+      forceFullscreenLandscape();
+    }
+  });
+</script>
+
+
+
+<!-- ===================================================================
+     MULAI GAME ENGINE (FULL + ANALOG)
+=================================================================== -->
+<script>
+  const TILE = 32;
+
+  const MAP = [
+    "########################",
+    "#..........#.......G..C#",
+    "#..######..#..######...#",
+    "#..#....#..#..#....#...#",
+    "#..#....#.....#....#...#",
+    "#..#...................#",
+    "#..####....G....####...#",
+    "#...............G......#",
+    "#..######......######..#",
+    "#K.....................#",
+    "########################"
+  ];
+
+  const rows = MAP.length;
+  const cols = MAP[0].length;
+
+  const canvas = document.getElementById("game");
+  canvas.width = cols * TILE;
+  canvas.height = rows * TILE;
+  const ctx = canvas.getContext("2d");
+
+  let walls = [];
+  let castle = null;
+
+  const player = { x:0, y:0, w:TILE-8, h:TILE-8, speed:2.5 };
+  let guards = [];
+  let coin = null;
+  let score = 0;
+  const targetScore = 10;
+  let gameWon = false;
+  let gameOver = false;
+  let gameOverTime = 0;
+
+  const keys = {};
+
+  /* ============================
+        ANALOG
+  ============================ */
+  const joyArea = document.getElementById("joystick");
+  const joyHandle = document.getElementById("joystick-handle");
+  let joyActive = false;
+  let joyVector = {x:0, y:0};
+  let joyCenter = {x:0, y:0};
+  let joyMaxRadius = 0;
+
+  function initJoystick() {
+    const r = joyArea.getBoundingClientRect();
+    const h = joyHandle.getBoundingClientRect();
+
+    joyCenter.x = r.left + r.width/2;
+    joyCenter.y = r.top + r.height/2;
+    joyMaxRadius = (r.width/2) - (h.width/2);
+
+    joyHandle.style.left = (r.width/2 - h.width/2) + "px";
+    joyHandle.style.top = (r.height/2 - h.height/2) + "px";
+  }
+
+  function resetJoy() {
+    joyVector.x = 0;
+    joyVector.y = 0;
+    initJoystick();
+  }
+
+  function pointerPos(e){ return {x:e.clientX, y:e.clientY}; }
+
+  joyArea.addEventListener("pointerdown", e=>{
+    e.preventDefault();
+    joyActive = true;
+    initJoystick();
+    moveJoy(e);
+  });
+
+  window.addEventListener("pointermove", e=>{
+    if (joyActive) moveJoy(e);
+  });
+
+  window.addEventListener("pointerup", ()=>{ joyActive=false; resetJoy(); });
+  window.addEventListener("pointercancel", ()=>{ joyActive=false; resetJoy(); });
+
+  function moveJoy(e){
+    const p = pointerPos(e);
+    let dx = p.x - joyCenter.x;
+    let dy = p.y - joyCenter.y;
+    const dist = Math.hypot(dx,dy);
+
+    if (dist > joyMaxRadius){
+      dx = dx/dist * joyMaxRadius;
+      dy = dy/dist * joyMaxRadius;
+    }
+
+    joyVector.x = dx / joyMaxRadius;
+    joyVector.y = dy / joyMaxRadius;
+
+    joyHandle.style.left = (70 + dx - 30) + "px";
+    joyHandle.style.top = (70 + dy - 30) + "px";
+  }
+
+  /* ============================
+        AUDIO + IMAGE
+  ============================ */
+  const deathImg = new Image();
+  deathImg.src = "pocong1.png";
+  let deathImgLoaded = false;
+  deathImg.onload = ()=>{ deathImgLoaded = true; };
+
+  const chaseSound = new Audio("chase.wav");
+  chaseSound.loop = true;
+  chaseSound.volume = 0.8;
+
+  const jumpscareSound = new Audio("FNAF_Jumpscare.mp3");
+
+  let audioUnlocked = false;
+  function unlockAudio(){
+    if (audioUnlocked) return;
+    audioUnlocked = true;
+    chaseSound.play().then(()=>{chaseSound.pause();}).catch(()=>{});
+    jumpscareSound.play().then(()=>{jumpscareSound.pause();}).catch(()=>{});
+  }
+
+  window.addEventListener("keydown", unlockAudio);
+  canvas.addEventListener("click", unlockAudio);
+
+
+  /* ============================
+        INIT MAP
+  ============================ */
+  function initMap(){
+    walls = [];
+    guards = [];
+    castle = null;
+
+    for (let r=0; r<rows; r++){
+      for (let c=0; c<cols; c++){
+        const ch = MAP[r][c];
+        const x = c*TILE;
+        const y = r*TILE;
+
+        if (ch==="#") walls.push({x,y,w:TILE,h:TILE});
+        else if (ch==="K") { player.x = x+4; player.y=y+4; }
+        else if (ch==="C") castle={x,y,w:TILE,h:TILE};
+        else if (ch==="G") guards.push({
+          x:x+6,y:y+6,w:TILE-12,h:TILE-12,
+          speedPatrol:1.5, speedChase:2.4,
+          patrolDir: Math.random()<0.5?-1:1,
+          originX:x+6,
+          patrolDistance:TILE*4,
+          state:"patrol"
+        });
+      }
+    }
+  }
+
+  function rectsCollide(a,b){
+    return(
+      a.x < b.x+b.w &&
+      a.x+a.w > b.x &&
+      a.y < b.y+b.h &&
+      a.y+a.h > b.y
+    );
+  }
+
+  function hasLineOfSight(gx,gy,px,py){
+    const steps=24;
+    for(let i=0;i<=steps;i++){
+      const t=i/steps;
+      const x=gx+(px-gx)*t;
+      const y=gy+(py-gy)*t;
+
+      const pr={x:x-1,y:y-1,w:2,h:2};
+      for(const w of walls){
+        if(rectsCollide(pr,w)) return false;
+      }
+    }
+    return true;
+  }
+
+  function moveWithCollision(obj,dx,dy){
+    if(dx!==0){
+      const future={x:obj.x+dx,y:obj.y,w:obj.w,h:obj.h};
+      if(!walls.some(w=>rectsCollide(future,w))) obj.x+=dx;
+    }
+    if(dy!==0){
+      const future={x:obj.x,y:obj.y+dy,w:obj.w,h:obj.h};
+      if(!walls.some(w=>rectsCollide(future,w))) obj.y+=dy;
+    }
+  }
+
+
+  /* ============================
+        COIN
+  ============================ */
+  function spawnCoin(){
+    while(true){
+      const r=Math.floor(Math.random()*rows);
+      const c=Math.floor(Math.random()*cols);
+      const ch=MAP[r][c];
+      if(ch==="#"||ch==="G"||ch==="K"||ch==="C") continue;
+
+      coin={
+        x:c*TILE+TILE/2,
+        y:r*TILE+TILE/2,
+        size:14
+      };
+      break;
+    }
+  }
+
+  /* ============================
+        GUARD AI
+  ============================ */
+  function updateGuard(g,dt){
+    const gx=g.x+g.w/2;
+    const gy=g.y+g.h/2;
+    const px=player.x+player.w/2;
+    const py=player.y+player.h/2;
+
+    const dxp=px-gx;
+    const dyp=py-gy;
+    const dist=Math.hypot(dxp,dyp);
+    const detection=TILE*6;
+
+    const canSee=hasLineOfSight(gx,gy,px,py);
+
+    if(dist<detection && canSee) g.state="chase";
+    else if(dist>detection*1.4 || !canSee) g.state="patrol";
+
+    let dx=0, dy=0;
+
+    if(g.state==="chase"){
+      dx = dxp/dist * g.speedChase * dt;
+      dy = dyp/dist * g.speedChase * dt;
+    } else {
+      dx = g.patrolDir * g.speedPatrol * dt;
+    }
+
+    const oldX = g.x;
+    moveWithCollision(g,dx,dy);
+
+    if(g.state==="patrol"){
+      if(g.x===oldX) g.patrolDir*=-1;
+      if(Math.abs(g.x-g.originX)>g.patrolDistance) g.patrolDir*=-1;
+    }
+
+    if(rectsCollide(g,player)) triggerGameOver();
+  }
+
+  let chasePlaying=false;
+  function updateGuards(dt){
+    let chasing=false;
+    guards.forEach(g=>{
+      updateGuard(g,dt);
+      if(g.state==="chase") chasing=true;
+    });
+
+    if(!gameOver && !gameWon){
+      if(chasing && !chasePlaying){
+        chasePlaying=true;
+        chaseSound.currentTime=0;
+        chaseSound.play().catch(()=>{});
+      }
+      if(!chasing && chasePlaying){
+        chasePlaying=false;
+        chaseSound.pause();
+      }
+    }
+  }
+
+  function triggerGameOver(){
+    if(gameOver || gameWon) return;
+    gameOver=true;
+    gameOverTime=performance.now();
+
+    chaseSound.pause();
+    chasePlaying=false;
+
+    jumpscareSound.currentTime=0;
+    jumpscareSound.play().catch(()=>{});
+  }
+
+  /* ============================
+        UPDATE LOOP
+  ============================ */
+  let lastTime=0;
+  function update(t){
+    const dt=(t-lastTime)/16.67;
+    lastTime=t;
+
+    if(!gameWon && !gameOver){
+      let dx=0, dy=0;
+
+      if(keys["a"]||keys["A"]||keys["ArrowLeft"]) dx-=player.speed*dt;
+      if(keys["d"]||keys["D"]||keys["ArrowRight"]) dx+=player.speed*dt;
+      if(keys["w"]||keys["W"]||keys["ArrowUp"]) dy-=player.speed*dt;
+      if(keys["s"]||keys["S"]||keys["ArrowDown"]) dy+=player.speed*dt;
+
+      dx += joyVector.x * player.speed * dt;
+      dy += joyVector.y * player.speed * dt;
+
+      moveWithCollision(player,dx,dy);
+      updateGuards(dt);
+
+      if(coin){
+        const cr={x:coin.x-coin.size/2,y:coin.y-coin.size/2,w:coin.size,h:coin.size};
+        if(rectsCollide(player,cr)){
+          score++;
+          spawnCoin();
+        }
+      }
+
+      if(castle && score>=targetScore){
+        if(rectsCollide(player,castle)){
+          gameWon=true;
+          chaseSound.pause();
+        }
+      }
+    }
+
+    draw();
+    requestAnimationFrame(update);
+  }
+
+  /* ============================
+        RENDER
+  ============================ */
+  function drawMap(){
+    for(let r=0;r<rows;r++){
+      for(let c=0;c<cols;c++){
+        const ch=MAP[r][c];
+        const x=c*TILE, y=r*TILE;
+
+        ctx.fillStyle="#111827";
+        ctx.fillRect(x,y,TILE,TILE);
+
+        if(ch==="."||ch==="K"||ch==="C"||ch==="G"){
+          ctx.fillStyle="#1f2937";
+          ctx.fillRect(x+2,y+2,TILE-4,TILE-4);
+        }
+        if(ch==="#"){
+          ctx.fillStyle="#4b5563";
+          ctx.fillRect(x,y,TILE,TILE);
+          ctx.fillStyle="#9ca3af";
+          ctx.fillRect(x+4,y+4,TILE-8,TILE-8);
+        }
+        if(ch==="C"){
+          ctx.fillStyle="#d97706";
+          ctx.fillRect(x+4,y+4,TILE-8,TILE-8);
+          ctx.fillStyle="#facc15";
+          ctx.fillRect(x+TILE/2-2,y-4,4,10);
+        }
+      }
+    }
+  }
+
+  function drawPlayer(){
+    ctx.fillStyle="#3b82f6";
+    ctx.fillRect(player.x,player.y,player.w,player.h);
+
+    ctx.fillStyle="#e5e7eb";
+    ctx.fillRect(player.x+6,player.y-2,player.w-12,8);
+
+    ctx.fillStyle="#10b981";
+    ctx.fillRect(player.x-4,player.y+8,6,10);
+  }
+
+  function drawGuards(){
+    guards.forEach(g=>{
+      ctx.fillStyle="#ef4444";
+      ctx.fillRect(g.x,g.y,g.w,g.h);
+      ctx.fillStyle="#fde68a";
+      ctx.fillRect(g.x+4,g.y-2,g.w-8,6);
+    });
+  }
+
+  function drawCoin(){
+    if(!coin) return;
+    ctx.fillStyle="#facc15";
+    ctx.fillRect(coin.x-7,coin.y-7,14,14);
+  }
+
+  function drawUI(){
+    ctx.fillStyle="rgba(0,0,0,0.6)";
+    ctx.fillRect(0,0,canvas.width,28);
+
+    ctx.fillStyle="#fff";
+    ctx.font="16px monospace";
+    ctx.fillText("Koin: "+score+" / "+targetScore, 10, 18);
+
+    if(gameWon){
+      ctx.fillStyle="rgba(0,0,0,0.7)";
+      ctx.fillRect(canvas.width/2-150,canvas.height/2-40,300,80);
+
+      ctx.fillStyle="#facc15";
+      ctx.strokeStyle="#facc15";
+      ctx.strokeRect(canvas.width/2-150,canvas.height/2-40,300,80);
+
+      ctx.fillStyle="#fff";
+      ctx.font="20px monospace";
+      ctx.textAlign="center";
+      ctx.fillText("KERAJAAN SELAMAT!",canvas.width/2,canvas.height/2-5);
+      ctx.font="14px monospace";
+      ctx.fillText("Refresh untuk main lagi",canvas.width/2,canvas.height/2+20);
+      ctx.textAlign="left";
+    }
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    if(gameOver){
+      drawDeathScreen();
+      return;
+    }
+
+    drawMap();
+    drawCoin();
+    drawGuards();
+    drawPlayer();
+    drawUI();
+  }
+
+  function drawDeathScreen(){
+    if(!deathImgLoaded){
+      ctx.fillStyle="black";
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      return;
+    }
+
+    const t=performance.now()-gameOverTime;
+    const shake=Math.max(0,20-t*0.04);
+    const scale=1.3+Math.min(1, t/300);
+
+    ctx.save();
+    const ox=(Math.random()*2-1)*shake;
+    const oy=(Math.random()*2-1)*shake;
+    ctx.translate(canvas.width/2+ox,canvas.height/2+oy);
+    ctx.scale(scale,scale);
+    ctx.drawImage(deathImg, -canvas.width/2, -canvas.height/2, canvas.width, canvas.height);
+    ctx.restore();
+
+    if(t < 200){
+      ctx.fillStyle="rgba(255,0,0,0.5)";
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    }
+  }
+
+  /* ============================
+        START
+  ============================ */
+  initMap();
+  spawnCoin();
+  initJoystick();
+  window.addEventListener("resize",initJoystick);
+  requestAnimationFrame(update);
+
+  document.addEventListener("keydown", e=>keys[e.key]=true);
+  document.addEventListener("keyup", e=>keys[e.key]=false);
+</script>
+
+</body>
+</html>
